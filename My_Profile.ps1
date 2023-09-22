@@ -50,3 +50,12 @@ function system-info {
 function list-drives {
     Get-WmiObject -Class Win32_LogicalDisk
 }
+ 
+# Utility Functions
+function show-hidden-files {
+    Get-ChildItem -Force
+}
+
+function clear-screen {
+    Clear-Host
+}
