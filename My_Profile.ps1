@@ -1,17 +1,18 @@
-function admin{
+function admin {
 start-process wt -verb runas;exit
 }
 
-function nano($file){
+function nano($file) {
 & "C:\Program Files\Git\usr\bin\nano.exe" $file
 }
 
-function vi($file){
+function vi($file) {
 & "C:\Program Files\Git\usr\bin\vim.exe" $file
 }
 
-function vim{
-vi}
+function vim {
+    vi
+}
 
 # Import the Chocolatey Profile that contains the necessary code to enable
 # tab-completions to function for `choco`.
@@ -26,3 +27,26 @@ Import-Module "$ChocolateyProfile"
 <#<function python{
 & "C:\Python311\python.exe" 
 }#>
+
+# Git commands
+
+function git-status {
+    git status
+}
+
+function git-branch {
+    git branch
+}
+
+function git-clone($repository) {
+    git clone $repository
+}
+
+# System information
+function system-info {
+    Get-ComputerInfo
+}
+
+function list-drives {
+    Get-WmiObject -Class Win32_LogicalDisk
+}
