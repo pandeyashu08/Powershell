@@ -1,17 +1,23 @@
-function admin {
+#pwsh theme
+
+oh-my-posh init pwsh --config "$env:POSH_THEMES_PATH\paradox.omp.json" | Invoke-Expression
+
+
+function admin{
 start-process wt -verb runas;exit
 }
 
-function nano($file) {
+function nano($file){
 & "C:\Program Files\Git\usr\bin\nano.exe" $file
 }
 
-function vi($file) {
+function vi($file){
 & "C:\Program Files\Git\usr\bin\vim.exe" $file
 }
+sal -name vim -Value vi
 
-function vim {
-    vi
+function whereis($file){
+gcm $file -all | select CommandType,Name,Source
 }
 
 # Import the Chocolatey Profile that contains the necessary code to enable
@@ -24,38 +30,14 @@ if (Test-Path($ChocolateyProfile)) {
 Import-Module "$ChocolateyProfile"
 }
 
-<#<function python{
-& "C:\Python311\python.exe" 
-}#>
+#Setting PSReadline MenuComplete
+Set-PSReadLineKeyHandler -Chord Alt+a -Function "MenuComplete"
 
-# Git commands
+$Desk = "C:\Users\Ashutosh\Desktop\"
+$StartMenu = 'C:\ProgramData\Microsoft\Windows\Start Menu\Programs'
 
-function git-status {
-    git status
-}
+sal -Name neofetch -Value winfetch
 
-function git-branch {
-    git branch
-}
-
-function git-clone($repository) {
-    git clone $repository
-}
-
-# System information
-function system-info {
-    Get-ComputerInfo
-}
-
-function list-drives {
-    Get-WmiObject -Class Win32_LogicalDisk
-}
- 
-# Utility Functions
-function show-hidden-files {
-    Get-ChildItem -Force
-}
-
-function clear-screen {
-    Clear-Host
-}
+<# New-PSDrive -Name "Desk" -PSProvider FileSystem -Root "C:\Users\Ashutosh\Desktop\" -Scope Global 
+<choco-cleaner> To clean temp files
+#>
