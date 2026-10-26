@@ -7,7 +7,8 @@
       1. Load the application catalog and select all apps or keys passed to -Apps.
       2. For WinGet/Store apps, verify winget.exe and the required source.
       3. Query WinGet's installed inventory; skip a package when its exact ID is detected.
-      4. Otherwise install using the exact ID and non-interactive agreement options.
+      4. Otherwise install using the exact ID, --silent, non-interactive agreement options,
+         and a user installation scope for Git to avoid machine-wide elevation where supported.
       5. For Veluna, check the uninstall registry, query the official GitHub latest-release API,
          select the Windows x64 setup EXE, download it, check its signature status, and run /S.
       6. Record Installed, Skipped, Preview, Unverified, or Failed and continue after individual failures.
@@ -21,8 +22,11 @@
     SAFETY/REPORTING
       - Does not reset WinGet sources automatically.
       - Does not bypass installer security warnings or ignore WinGet package hash failures.
-      - Veluna's /S switch was confirmed in the user's environment. The downloaded setup is unsigned,
-        so the script logs that fact; download is from the official repository's GitHub release URL.
+      - Veluna's /S switch was confirmed in the user's environment. The script checks Authenticode
+        status: valid signatures are logged; unsigned files produce a warning; other signature states
+        are rejected. The download URL is checked against the official repository's release path.
+      - WinGet installs use --silent to suppress installer wizards. Git uses --scope user.
+      - Use -Reinstall with selected app keys to force a silent reinstall of apps already detected.
       - WinGet exit code 0 is not treated as proof of installation unless inventory verification succeeds.
         Store inventory may not always be queryable, so results can be marked Unverified.
 
@@ -57,7 +61,7 @@
     Get-Help .\Install-EssentialApps.ps1 -Full
 
 .NOTES
-    Version: 2.0
+    Version: 2.2
     Requires Windows PowerShell 5.1 or later.
     WinGet/App Installer is required for WinGet and Store packages.
     Log:      %LOCALAPPDATA%\EssentialApps\setup.log
@@ -71,7 +75,8 @@
 param(
     [string[]]$Apps,
     [switch]$ListOnly,
-    [switch]$About
+    [switch]$About,
+    [switch]$Reinstall
 )
 
 Set-StrictMode -Version Latest
@@ -82,6 +87,40 @@ $Script:DownloadDir = Join-Path $Script:Root 'Downloads'
 $Script:LogFile = Join-Path $Script:Root 'setup.log'
 $Script:ReportFile = Join-Path $Script:Root 'results.csv'
 $Script:Winget = $null
+
+function Get-WinGetPath {
+    # First use the Windows App Execution Alias / PATH entry.
+    $command = Get-Command 'winget.exe' -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+
+    if ($command) {
+        if ($command.Source) { return $command.Source }
+        if ($command.Path)   { return $command.Path }
+    }
+
+    # Fallback: inspect the registered App Installer package rather than recursively
+    # scanning the entire WindowsApps directory.
+    if (Get-Command Get-AppxPackage -ErrorAction SilentlyContinue) {
+        $packages = @(
+            Get-AppxPackage -Name 'Microsoft.DesktopAppInstaller' -ErrorAction SilentlyContinue
+        )
+        foreach ($package in $packages) {
+            if ($package.InstallLocation) {
+                $candidate = Join-Path $package.InstallLocation 'winget.exe'
+                if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                    return $candidate
+                }
+            }
+        }
+    }
+
+    $aliasPath = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe'
+    if (Test-Path -LiteralPath $aliasPath -PathType Leaf) {
+        return $aliasPath
+    }
+
+    throw "winget.exe was not found. Install or update 'App Installer' from Microsoft Store, then open a new PowerShell window and verify with: winget --version"
+}
 
 function Write-Log {
     param(
@@ -115,7 +154,7 @@ function Get-AppCatalog {
         [pscustomobject]@{ Key = 'Screenbox';     Name = 'Screenbox';              Source = 'winget';   Id = 'Starpine.Screenbox' }
         [pscustomobject]@{ Key = 'UniGetUI';      Name = 'UniGetUI';              Source = 'winget';   Id = 'Devolutions.UniGetUI' }
         [pscustomobject]@{ Key = 'Unigram';       Name = 'Unigram';               Source = 'ms-store'; Id = '9N97ZCKPD60Q' }
-        [pscustomobject]@{ Key = 'Git';           Name = 'Git';                   Source = 'winget';   Id = 'Git.Git' }
+        [pscustomobject]@{ Key = 'Git';           Name = 'Git';                   Source = 'winget';   Id = 'Git.Git'; Scope = 'user' }
         [pscustomobject]@{ Key = 'Chrome';        Name = 'Google Chrome';         Source = 'winget';   Id = 'Google.Chrome' }
         [pscustomobject]@{ Key = 'AquileReader';  Name = 'Aquile Reader';         Source = 'ms-store'; Id = '9P08T4JLTQNK' }
         [pscustomobject]@{ Key = 'Firefox';       Name = 'Mozilla Firefox';       Source = 'winget';   Id = 'Mozilla.Firefox' }
@@ -176,17 +215,25 @@ function Test-WinGetPackageInstalled {
 }
 
 function Install-WinGetPackage {
-    param([Parameter(Mandatory)][pscustomobject]$App)
+    param(
+        [Parameter(Mandatory)][pscustomobject]$App,
+        [bool]$Preview = $false,
+        [bool]$ForceReinstall = $false
+    )
 
     $sourceName = Get-WinGetSourceName -Source $App.Source
     Test-WinGetSourceAvailable -SourceName $sourceName
 
-    if (Test-WinGetPackageInstalled -Id $App.Id -Source $App.Source) {
+    $isInstalled = Test-WinGetPackageInstalled -Id $App.Id -Source $App.Source
+    if ($isInstalled -and -not $ForceReinstall) {
         Write-Log "$($App.Name) is already detected as installed. Skipping." 'SUCCESS'
         return 'Skipped'
     }
+    if ($isInstalled -and $ForceReinstall) {
+        Write-Log "$($App.Name) is installed; -Reinstall was specified, so a silent reinstall will be attempted." 'WARN'
+    }
 
-    if (-not $PSCmdlet.ShouldProcess($App.Name, "Install from WinGet source '$sourceName'")) {
+    if ($Preview) {
         Write-Log "WhatIf: would install $($App.Name) from '$sourceName'."
         return 'Preview'
     }
@@ -197,10 +244,25 @@ function Install-WinGetPackage {
         '--id', $App.Id,
         '--exact',
         '--source', $sourceName,
+        '--silent',
         '--accept-source-agreements',
         '--accept-package-agreements',
         '--disable-interactivity'
     )
+
+    # Git for Windows may otherwise choose a machine-wide installer and request UAC.
+    # The user scope is requested only for Git, where the package supports it.
+    if ($App.PSObject.Properties['Scope'] -and $App.Scope) {
+        $arguments += @('--scope', $App.Scope)
+    }
+
+    if ($ForceReinstall) {
+        $arguments += '--force'
+    }
+
+    Write-Log ("WinGet command options: --id {0} --exact --source {1} --silent{2}" -f
+        $App.Id, $sourceName,
+        $(if ($App.PSObject.Properties['Scope'] -and $App.Scope) { " --scope $($App.Scope)" } else { '' }))
 
     $output = @(& $Script:Winget @arguments 2>&1)
     $exitCode = $LASTEXITCODE
@@ -208,7 +270,9 @@ function Install-WinGetPackage {
     if ($text) { Write-Host $text }
 
     if ($exitCode -ne 0) {
-        $hexCode = '0x{0:X8}' -f ([uint32]($exitCode -band 0xFFFFFFFFL))
+        $unsignedExitCode = [long]$exitCode
+        if ($unsignedExitCode -lt 0) { $unsignedExitCode += 4294967296 }
+        $hexCode = '0x{0:X8}' -f [uint32]$unsignedExitCode
         if ($exitCode -eq -1978335214) {
             throw "WinGet source error for '$sourceName' (exit $exitCode / $hexCode). Check 'winget source list'."
         }
@@ -251,14 +315,17 @@ function Test-VelunaInstalled {
 }
 
 function Install-Veluna {
-    param([Parameter(Mandatory)][pscustomobject]$App)
+    param(
+        [Parameter(Mandatory)][pscustomobject]$App,
+        [bool]$Preview = $false
+    )
 
     if (Test-VelunaInstalled) {
         Write-Log 'Veluna is already installed. Skipping.' 'SUCCESS'
         return 'Skipped'
     }
 
-    if (-not $PSCmdlet.ShouldProcess('Veluna', 'Download latest official GitHub release and run silent setup')) {
+    if ($Preview) {
         Write-Log 'WhatIf: would query GitHub, download Veluna, and run setup with /S.'
         return 'Preview'
     }
@@ -289,12 +356,23 @@ function Install-Veluna {
         throw "No matching Veluna Windows x64 setup found in release '$($release.tag_name)'. Assets: $names"
     }
 
+    # Only download from the official repository's HTTPS release-asset path.
+    [uri]$downloadUri = $null
+    if (-not [uri]::TryCreate([string]$asset.browser_download_url, [UriKind]::Absolute, [ref]$downloadUri)) {
+        throw 'GitHub returned an invalid asset download URL.'
+    }
+    if ($downloadUri.Scheme -ne 'https' -or
+        $downloadUri.Host -ne 'github.com' -or
+        $downloadUri.AbsolutePath -notlike '/rry0ku/veluna/releases/download/*') {
+        throw "Unexpected Veluna asset URL; refusing to download from '$($downloadUri.Host)$($downloadUri.AbsolutePath)'."
+    }
+
     $installerPath = Join-Path $Script:DownloadDir $asset.name
     Write-Log "Latest Veluna release: $($release.tag_name)"
     Write-Log "Selected asset: $($asset.name)"
     Write-Log "Downloading to: $installerPath"
 
-    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $installerPath -ErrorAction Stop
+    Invoke-WebRequest -Uri $downloadUri.AbsoluteUri -OutFile $installerPath -ErrorAction Stop
 
     if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
         throw 'Download completed but installer file is missing.'
@@ -338,7 +416,7 @@ function Install-Veluna {
 
 if ($About) {
 @'
-Install-EssentialApps.ps1 — Version 2.0
+Install-EssentialApps.ps1 — Version 2.2
 
 Purpose:
   Install the configured essential apps using WinGet, Microsoft Store, or the official
@@ -348,10 +426,10 @@ Logic:
   1. Select apps from the catalog.
   2. Check installed state; skip apps already detected.
   3. Route by source:
-       winget   -> winget install --id <ID> --exact --source winget
-       ms-store -> winget install --id <StoreID> --exact --source msstore
+       winget   -> winget install --id <ID> --exact --source winget --silent
+       ms-store -> winget install --id <StoreID> --exact --source msstore --silent
        web      -> latest Veluna GitHub release -> download x64 setup -> run /S
-  4. Accept WinGet agreements and disable prompts.
+  4. Accept WinGet agreements, suppress installer wizards, and request user scope for Git.
   5. Capture exit codes, verify installed state where practical, and continue after failures.
   6. Write setup.log and results.csv.
 
@@ -359,6 +437,7 @@ Options:
   -Apps <keys>   Install selected catalog keys only.
   -ListOnly      Display catalog.
   -WhatIf        Preview install actions.
+  -Reinstall     Force a silent reinstall for selected apps even if already installed.
   -About         Display this information.
 
 Output:
@@ -369,6 +448,7 @@ Output:
 Examples:
   .\Install-EssentialApps.ps1
   .\Install-EssentialApps.ps1 -Apps Git,Vivaldi,Veluna
+  .\Install-EssentialApps.ps1 -Apps VSCodium,Chrome,FDM,Git -Reinstall
   .\Install-EssentialApps.ps1 -ListOnly
   .\Install-EssentialApps.ps1 -WhatIf
 '@ | Write-Host
@@ -406,10 +486,10 @@ foreach ($app in $selected) {
         Write-Log "Processing $($app.Name) [source: $($app.Source)]."
 
         if ($app.Source -in @('winget', 'ms-store')) {
-            $status = Install-WinGetPackage -App $app
+            $status = Install-WinGetPackage -App $app -Preview:$WhatIfPreference -ForceReinstall:$Reinstall
         }
         elseif ($app.Source -eq 'web') {
-            $status = Install-Veluna -App $app
+            $status = Install-Veluna -App $app -Preview:$WhatIfPreference
         }
         else {
             throw "Unsupported source label '$($app.Source)'."
